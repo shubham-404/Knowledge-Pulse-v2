@@ -3,14 +3,17 @@
 // invoicing product, Kestrel, with a public docs site as its knowledge source.
 
 import type {
+  ConversationSummary,
   EvaluationRun,
   Insight,
   InsightDetail,
   Overview,
+  Period,
   Report,
   ReportSummary,
   ResearchResult,
   ResearchSummary,
+  Scope,
   Source,
   Workspace,
 } from "@/lib/types";
@@ -395,9 +398,11 @@ export const mockEvaluation: EvaluationRun = {
   id: "eval_07",
   ranAt: "2026-08-30T19:40:00Z",
   questionCount: 50,
-  faithfulness: 0.86,
-  answerRelevance: 0.82,
-  contextRelevance: 0.68,
+  faithfulness: 0.91,
+  answerRelevance: 0.93,
+  contextRelevance: 0.84,
+  skippedCount: 2,
+  targets: { faithfulness: 0.8, answerRelevance: 0.8, contextRelevance: 0.8 },
   failures: [
     { question: "What happens when a UPI mandate is revoked?", metric: "context_relevance", score: 0.21 },
     { question: "Which exchange rate applies to a recurring USD invoice?", metric: "faithfulness", score: 0.44 },
@@ -405,7 +410,37 @@ export const mockEvaluation: EvaluationRun = {
   ],
 };
 
-export const mockPeriods: string[] = ["August 2026", "July 2026", "June 2026"];
+export const mockPeriods: Period[] = [
+  { period: "August 2026", queryCount: 947, analysed: true, topicCount: 12 },
+  { period: "July 2026", queryCount: 341, analysed: true, topicCount: 9 },
+  // Logged but never clustered: the case the period list used to hide entirely.
+  { period: "June 2026", queryCount: 188, analysed: false, topicCount: 0 },
+];
+
+export const mockScopes: Scope[] = [
+  { sourceId: null, label: "All sources", questionCount: 1476, analysed: true },
+  { sourceId: "src_docs", label: "Kestrel documentation", questionCount: 1103, analysed: true },
+  { sourceId: "src_handbook", label: "Kestrel onboarding handbook", questionCount: 373, analysed: false },
+];
+
+export const mockConversations: ConversationSummary[] = [
+  {
+    sessionId: "sess_mock_1",
+    startedAt: "2026-08-28T09:12:00Z",
+    lastMessageAt: "2026-08-28T09:19:00Z",
+    turnCount: 6,
+    title: "why did my client's autopay not go through",
+    meanConfidence: 0.31,
+  },
+  {
+    sessionId: "sess_mock_2",
+    startedAt: "2026-08-24T14:02:00Z",
+    lastMessageAt: "2026-08-24T14:05:00Z",
+    turnCount: 2,
+    title: "where do I add an LUT number for an export invoice",
+    meanConfidence: 0.74,
+  },
+];
 
 export const mockReportHistory: ReportSummary[] = [
   {

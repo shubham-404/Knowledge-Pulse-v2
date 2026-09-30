@@ -97,30 +97,95 @@ def _groq(
     return content
 
 # def _gemini(system: str, user: str, temperature: float, max_tokens: int) -> str:
-    if not settings.gemini_api_key:
-        raise LLMError("GEMINI_API_KEY is not set")
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent"
-    )
-    r = httpx.post(
-        url,
-        params={"key": settings.gemini_api_key},
-        json={
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
-        },
-        timeout=settings.llm_timeout_seconds,
-    )
-    if r.status_code != 200:
-        raise LLMError(f"Gemini returned {r.status_code}: {r.text[:300]}")
-    payload = r.json()
-    try:
-        return payload["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as exc:
-        raise LLMError(f"Unexpected Gemini response: {json.dumps(payload)[:300]}") from exc
-def _gemini(system: str, user: str, temperature: float, max_tokens: int) -> str:
+    # if not settings.gemini_api_key:
+    #     raise LLMError("GEMINI_API_KEY is not set")
+    # url = (
+    #     f"https://generativelanguage.googleapis.com/v1beta/models/"
+    #     f"{settings.gemini_model}:generateContent"
+    # )
+    # r = httpx.post(
+    #     url,
+    #     params={"key": settings.gemini_api_key},
+    #     json={
+    #         "systemInstruction": {"parts": [{"text": system}]},
+    #         "contents": [{"role": "user", "parts": [{"text": user}]}],
+    #         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+    #     },
+    #     timeout=settings.llm_timeout_seconds,
+    # )
+    # if r.status_code != 200:
+    #     raise LLMError(f"Gemini returned {r.status_code}: {r.text[:300]}")
+    # payload = r.json()
+    # try:
+    #     return payload["candidates"][0]["content"]["parts"][0]["text"]
+    # except (KeyError, IndexError) as exc:
+    #     raise LLMError(f"Unexpected Gemini response: {json.dumps(payload)[:300]}") from exc
+# def _gemini(system: str, user: str, temperature: float, max_tokens: int) -> str:
+#     if not settings.gemini_api_key:
+#         raise LLMError("GEMINI_API_KEY is not set")
+
+#     url = "https://generativelanguage.googleapis.com/v1/interactions"
+
+#     model = settings.gemini_model
+#     if not model.startswith("models/"):
+#         model = f"models/{model}"
+
+#     r = httpx.post(
+#         url,
+#         headers={
+#             "x-goog-api-key": settings.gemini_api_key,
+#             "Content-Type": "application/json",
+#         },
+#         json={
+#             "model": model,
+#             "input": user,
+#             "system_instruction": system,
+#             "store": False,
+#             "generation_config": {
+#                 "temperature": temperature,
+#                 "max_output_tokens": max_tokens,
+#                 "thinking_level": "minimal",
+#             },
+#         },
+#         timeout=settings.llm_timeout_seconds,
+#     )
+
+#     if r.status_code != 200:
+#         raise LLMError(
+#             f"Gemini returned {r.status_code}: {r.text[:500]}"
+#         )
+
+#     payload = r.json()
+
+#     if payload.get("status") != "completed":
+#         raise LLMError(
+#             f"Gemini interaction did not complete: "
+#             f"{json.dumps(payload)[:500]}"
+#         )
+
+#     try:
+#         for step in payload["steps"]:
+#             if step.get("type") == "model_output":
+#                 for content in step.get("content", []):
+#                     if content.get("type") == "text":
+#                         return content["text"]
+
+#     except (KeyError, TypeError):
+#         pass
+
+#     raise LLMError(
+#         f"Unexpected Gemini interaction response: "
+#         f"{json.dumps(payload)[:500]}"
+#     )
+
+def _gemini(
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    import time
+
     if not settings.gemini_api_key:
         raise LLMError("GEMINI_API_KEY is not set")
 
@@ -130,54 +195,95 @@ def _gemini(system: str, user: str, temperature: float, max_tokens: int) -> str:
     if not model.startswith("models/"):
         model = f"models/{model}"
 
-    r = httpx.post(
-        url,
-        headers={
-            "x-goog-api-key": settings.gemini_api_key,
-            "Content-Type": "application/json",
+    headers = {
+        "x-goog-api-key": settings.gemini_api_key,
+        "Content-Type": "application/json",
+    }
+
+    request_body = {
+        "model": model,
+        "input": user,
+        "system_instruction": system,
+        "store": False,
+        "generation_config": {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "thinking_level": "minimal",
         },
-        json={
-            "model": model,
-            "input": user,
-            "system_instruction": system,
-            "store": False,
-            "generation_config": {
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-                "thinking_level": "minimal",
-            },
-        },
-        timeout=settings.llm_timeout_seconds,
+    }
+
+    timeout = httpx.Timeout(
+        connect=20.0,
+        read=180.0,
+        write=30.0,
+        pool=20.0,
     )
 
-    if r.status_code != 200:
-        raise LLMError(
-            f"Gemini returned {r.status_code}: {r.text[:500]}"
-        )
+    for attempt in range(3):
+        try:
+            r = httpx.post(
+                url,
+                headers=headers,
+                json=request_body,
+                timeout=timeout,
+            )
 
-    payload = r.json()
+            if r.status_code in (429, 500, 502, 503, 504):
+                if attempt < 2:
+                    delay = 2 ** (attempt + 1)
+                    log.warning(
+                        "Gemini returned %s. Retrying in %ss.",
+                        r.status_code,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
 
-    if payload.get("status") != "completed":
-        raise LLMError(
-            f"Gemini interaction did not complete: "
-            f"{json.dumps(payload)[:500]}"
-        )
+            if r.status_code != 200:
+                raise LLMError(
+                    f"Gemini returned {r.status_code}: {r.text[:500]}"
+                )
 
-    try:
-        for step in payload["steps"]:
-            if step.get("type") == "model_output":
-                for content in step.get("content", []):
-                    if content.get("type") == "text":
-                        return content["text"]
+            payload = r.json()
 
-    except (KeyError, TypeError):
-        pass
+            if payload.get("status") != "completed":
+                raise LLMError(
+                    "Gemini interaction did not complete: "
+                    f"{json.dumps(payload)[:500]}"
+                )
 
-    raise LLMError(
-        f"Unexpected Gemini interaction response: "
-        f"{json.dumps(payload)[:500]}"
-    )
+            for step in payload.get("steps", []):
+                if step.get("type") == "model_output":
+                    for content in step.get("content", []):
+                        if content.get("type") == "text":
+                            result = content.get("text", "")
+                            if result.strip():
+                                return result
 
+            raise LLMError(
+                "Unexpected Gemini interaction response: "
+                f"{json.dumps(payload)[:500]}"
+            )
+
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ) as exc:
+            if attempt == 2:
+                raise LLMError(
+                    "Gemini request failed after 3 attempts"
+                ) from exc
+
+            delay = 2 ** (attempt + 1)
+            log.warning(
+                "Gemini request failed (%s). Retrying in %ss.",
+                type(exc).__name__,
+                delay,
+            )
+            time.sleep(delay)
+
+    raise LLMError("Gemini failed after 3 attempts")
 def complete(
     user: str,
     system: str = "You are a careful assistant. Answer only from what you are given.",

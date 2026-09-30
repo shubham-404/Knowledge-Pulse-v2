@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import evaluation  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.migrate import upgrade  # noqa: E402
 from app.tenant import resolve_workspace  # noqa: E402
@@ -33,6 +34,8 @@ def main() -> None:
                         help="Organisation id. Default: org_default, or the workspace's own")
     parser.add_argument("--set", default=None, help="Question file. Default: data/eval_set_<workspace>.json, "
                         "falling back to data/eval_set.json")
+    parser.add_argument("--source", default=None,
+                        help="Score against one indexed source only (see GET /api/sources).")
     args = parser.parse_args()
 
     upgrade()
@@ -44,12 +47,24 @@ def main() -> None:
             path = "data/eval_set.json"
         questions = evaluation.load_question_set(path)
         log.info("Scoring %d questions from %s in %s", len(questions), path, args.workspace)
-        run = evaluation.run_evaluation(db, questions, args.workspace)
-        log.info("faithfulness      %.2f", run.faithfulness)
-        log.info("answer relevance  %.2f", run.answer_relevance)
-        log.info("context relevance %.2f", run.context_relevance)
-        if run.faithfulness < 0.80:
-            log.warning("Faithfulness is below the 0.80 target set in NFR4.")
+        run = evaluation.run_evaluation(db, questions, args.workspace, args.source)
+        log.info("Scored %d questions; %d dropped because the judge was unreachable",
+                 run.question_count, run.skipped_count)
+        for label, value, target in (
+            ("faithfulness     ", run.faithfulness, settings.eval_target_faithfulness),
+            ("answer relevance ", run.answer_relevance, settings.eval_target_answer_relevance),
+            ("context relevance", run.context_relevance, settings.eval_target_context_relevance),
+        ):
+            mark = "ok " if value >= target else "LOW"
+            log.info("%s %s %.3f  (target %.2f)", mark, label, value, target)
+        if run.faithfulness < settings.eval_target_faithfulness:
+            log.warning("Faithfulness is below the %.2f target set in NFR4.",
+                        settings.eval_target_faithfulness)
+        if run.skipped_count > run.question_count:
+            log.warning(
+                "More questions were dropped than scored. The scores are real but the "
+                "sample is small: rerun when the API quota has recovered."
+            )
     finally:
         db.close()
 

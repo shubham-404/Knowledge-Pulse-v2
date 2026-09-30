@@ -17,10 +17,12 @@ import {
 import { useToast } from "@/components/toast";
 import { ConfidenceChart, QuestionVolumeChart } from "@/components/overview/charts";
 import { AtAGlance } from "@/components/overview/AtAGlance";
+import { SourceFilter, useScope } from "@/components/filters";
 
 export function OverviewPage() {
-  const overview = useAsync(() => api.getOverview(), []);
-  const insights = useAsync(() => api.getInsights(), []);
+  const { sourceId, label: sourceLabel, reload: reloadScopes } = useScope();
+  const overview = useAsync(() => api.getOverview({ source: sourceId }), [sourceId]);
+  const insights = useAsync(() => api.getInsights({ source: sourceId }), [sourceId]);
   const toast = useToast();
   const [running, setRunning] = useState(false);
 
@@ -33,8 +35,14 @@ export function OverviewPage() {
   async function runAnalytics() {
     setRunning(true);
     try {
+      // No period and no source: every period, for the workspace as a whole and
+      // once per indexed site, so the per-site pages fill in too.
       await api.runAnalytics();
-      toast("Analytics started. Topics and the report will update when the batch finishes.", "success");
+      toast(
+        "Analytics started for every period and every source. Topics and reports will update when the batch finishes.",
+        "success",
+      );
+      reloadScopes();
       refresh();
     } catch (e) {
       toast(`Could not start analytics. ${(e as Error).message}`, "error");
@@ -52,11 +60,14 @@ export function OverviewPage() {
         title="This period"
         description={
           o
-            ? `Customer conversation and knowledge health for ${o.period}.`
+            ? `Customer conversation and knowledge health for ${o.period}${
+                o.sourceLabel ? `, across ${o.sourceLabel} only` : ""
+              }.`
             : "Customer conversation and knowledge health for the current period."
         }
         actions={
           <>
+            <SourceFilter />
             <RefreshButton onClick={refresh} loading={refreshing} />
             <Button onClick={runAnalytics} busy={running}>
               {!running && <Play size={14} aria-hidden />}
@@ -79,7 +90,11 @@ export function OverviewPage() {
       {o && o.queryCount === 0 && (
         <EmptyState
           title="No conversations yet"
-          description="Once customers start asking the assistant questions, this page shows what they asked and how well your sources answered."
+          description={
+            sourceId
+              ? `Nothing has been asked that was answered from ${sourceLabel} yet. Pick another source, or choose All sources to see the whole workspace.`
+              : "Once customers start asking the assistant questions, this page shows what they asked and how well your sources answered."
+          }
           action={<Button onClick={runAnalytics} busy={running}>Run analytics</Button>}
         />
       )}

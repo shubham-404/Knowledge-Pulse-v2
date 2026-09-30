@@ -27,6 +27,7 @@ from app.models import (
     Message,
     Recommendation,
     Report,
+    Source,
     TopicCluster,
 )
 from app.tenant import organization_of
@@ -43,25 +44,42 @@ def previous_period(period: str) -> str:
     return f"{year - 1}-12" if month == 1 else f"{year}-{month - 1:02d}"
 
 
-def run_batch(db: Session, period: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> Report | None:
-    log.info("Analytics batch starting for %s in %s", period, workspace_id)
-    organization_id = organization_of(db, workspace_id)
+def run_batch(
+    db: Session,
+    period: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    source_id: str | None = None,
+) -> Report | None:
+    """Cluster and report on one period.
 
-    questions = (
-        db.query(Message)
-        .filter(
-            Message.workspace_id == workspace_id,
-            Message.role == "customer",
-            Message.period == period,
-        )
-        .order_by(Message.created_at)
-        .all()
+    source_id narrows the batch to the questions that were answered from one
+    knowledge source. A workspace holding five documentation sites can therefore
+    carry one set of topics for the whole workspace and one set per site, in the
+    same period, without any of them overwriting the others: every row is keyed
+    by (period, workspace, source), and re-running a scope only clears its own.
+    """
+    scope = source_id or "all sources"
+    log.info("Analytics batch starting for %s in %s (%s)", period, workspace_id, scope)
+    organization_id = organization_of(db, workspace_id)
+    source_label = _source_label(db, source_id)
+
+    query = db.query(Message).filter(
+        Message.workspace_id == workspace_id,
+        Message.role == "customer",
+        Message.period == period,
     )
+    if source_id:
+        query = query.filter(Message.source_id == source_id)
+    questions = query.order_by(Message.created_at).all()
+
     if len(questions) < settings.hdbscan_min_cluster_size * 2:
-        log.warning("Only %d questions in %s; nothing to analyse", len(questions), period)
+        log.warning(
+            "Only %d questions in %s (%s); need at least %d to cluster, nothing to analyse",
+            len(questions), period, scope, settings.hdbscan_min_cluster_size * 2,
+        )
         return None
 
-    _clear_period(db, period, workspace_id)
+    _clear_period(db, period, workspace_id, source_id)
 
     texts = [q.text for q in questions]
     confidences = [q.confidence if q.confidence is not None else 0.0 for q in questions]
@@ -74,11 +92,14 @@ def run_batch(db: Session, period: str, workspace_id: str = DEFAULT_WORKSPACE_ID
         log.warning("No topics emerged for %s", period)
         return None
 
+    # Growth is measured against the same scope a period earlier, never against
+    # a different site's topics.
     prior = (
         db.query(TopicCluster)
         .filter(
             TopicCluster.workspace_id == workspace_id,
             TopicCluster.period == previous_period(period),
+            TopicCluster.source_id.is_(None) if source_id is None else TopicCluster.source_id == source_id,
         )
         .all()
     )
@@ -96,6 +117,8 @@ def run_batch(db: Session, period: str, workspace_id: str = DEFAULT_WORKSPACE_ID
             organization_id=organization_id,
             workspace_id=workspace_id,
             period=period,
+            source_id=source_id,
+            source_label=source_label,
             name=cluster.name,
             keywords=cluster.keywords,
             query_count=count,
@@ -130,21 +153,46 @@ def run_batch(db: Session, period: str, workspace_id: str = DEFAULT_WORKSPACE_ID
         row.rank = position
     db.commit()
 
-    report = _build_report(db, period, rows, questions, workspace_id, organization_id)
+    report = _build_report(
+        db, period, rows, questions, workspace_id, organization_id, source_id, source_label
+    )
     log.info("Batch complete: %d topics, %d recommendations", len(rows), len(report.recommendations))
     return report
 
 
-def _clear_period(db: Session, period: str, workspace_id: str) -> None:
+def _source_label(db: Session, source_id: str | None) -> str | None:
+    if not source_id:
+        return None
+    source = db.get(Source, source_id)
+    return source.label if source else None
+
+
+def _scope(column, source_id: str | None):
+    """Match rows of exactly this scope: one source, or the unscoped whole."""
+    return column.is_(None) if source_id is None else column == source_id
+
+
+def _clear_period(db: Session, period: str, workspace_id: str, source_id: str | None = None) -> None:
+    """Remove only the rows this scope owns, so the other scopes survive."""
     old_clusters = (
         db.query(TopicCluster)
-        .filter(TopicCluster.workspace_id == workspace_id, TopicCluster.period == period)
+        .filter(
+            TopicCluster.workspace_id == workspace_id,
+            TopicCluster.period == period,
+            _scope(TopicCluster.source_id, source_id),
+        )
         .all()
     )
     for cluster in old_clusters:
         db.delete(cluster)
     old_reports = (
-        db.query(Report).filter(Report.workspace_id == workspace_id, Report.period == period).all()
+        db.query(Report)
+        .filter(
+            Report.workspace_id == workspace_id,
+            Report.period == period,
+            _scope(Report.source_id, source_id),
+        )
+        .all()
     )
     for old_report in old_reports:
         db.delete(old_report)
@@ -158,22 +206,26 @@ def _build_report(
     questions: list[Message],
     workspace_id: str,
     organization_id: str,
+    source_id: str | None = None,
+    source_label: str | None = None,
 ) -> Report:
     low = sum(1 for q in questions if (q.confidence or 0) < settings.low_confidence_threshold)
     unanswered_rate = round(low / len(questions), 4)
 
-    conversation_count = (
-        db.query(func.count(func.distinct(Message.conversation_id)))
-        .filter(Message.workspace_id == workspace_id, Message.period == period)
-        .scalar()
-        or 0
+    conversation_query = db.query(func.count(func.distinct(Message.conversation_id))).filter(
+        Message.workspace_id == workspace_id, Message.period == period
     )
+    if source_id:
+        conversation_query = conversation_query.filter(Message.source_id == source_id)
+    conversation_count = conversation_query.scalar() or 0
 
     report = Report(
         id=new_id("rep"),
         organization_id=organization_id,
         workspace_id=workspace_id,
         period=period,
+        source_id=source_id,
+        source_label=source_label,
         generated_at=datetime.now(timezone.utc),
         conversation_count=conversation_count,
         query_count=len(questions),
@@ -217,10 +269,9 @@ def latest_period(db: Session, workspace_id: str = DEFAULT_WORKSPACE_ID) -> str 
     return row or None
 
 
-def run_for_all_periods(db: Session, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[Report]:
-    """Used after seeding, when several months arrive at once. Order matters —
-    each period needs the previous one already clustered to compute growth."""
-    periods = [
+def analysable_periods(db: Session, workspace_id: str = DEFAULT_WORKSPACE_ID) -> list[str]:
+    """Every period that has logged questions, oldest first."""
+    return [
         p[0]
         for p in db.query(Message.period)
         .filter(Message.workspace_id == workspace_id, Message.role == "customer")
@@ -228,9 +279,43 @@ def run_for_all_periods(db: Session, workspace_id: str = DEFAULT_WORKSPACE_ID) -
         .order_by(Message.period)
         if p[0]
     ]
+
+
+def run_for_all_periods(
+    db: Session,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    per_source: bool = True,
+) -> list[Report]:
+    """Every period, and by default every source within each period.
+
+    Order matters: each period needs the previous one already clustered before
+    growth can be computed, so the periods run oldest first. Within a period the
+    whole-workspace scope runs first, then one scope per source that has traffic,
+    which is what makes the Insights and Report pages change when you pick a
+    different documentation site.
+    """
+    periods = analysable_periods(db, workspace_id)
+    scopes: list[str | None] = [None]
+    if per_source:
+        scopes += [
+            row[0]
+            for row in db.query(Message.source_id)
+            .filter(
+                Message.workspace_id == workspace_id,
+                Message.role == "customer",
+                Message.source_id.isnot(None),
+            )
+            .distinct()
+            .all()
+            if row[0]
+        ]
+
     reports = []
-    for period in periods:
-        report = run_batch(db, period, workspace_id)
-        if report:
-            reports.append(report)
+    for scope in scopes:
+        for period in periods:
+            report = run_batch(db, period, workspace_id, scope)
+            if report:
+                reports.append(report)
+    log.info("Analysed %d period/source combinations, wrote %d reports",
+             len(periods) * len(scopes), len(reports))
     return reports

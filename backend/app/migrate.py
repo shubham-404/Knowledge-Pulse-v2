@@ -66,6 +66,17 @@ def _add_column(table: str, column: str, ddl: str) -> None:
 
 def _add_columns() -> None:
     _add_column("messages", "citations", "JSON")
+    # Source attribution: which indexed site or document a turn was answered
+    # from, so one workspace can hold several documentation sites and still be
+    # reported on per site.
+    _add_column("messages", "source_id", "VARCHAR(40)")
+    _add_column("messages", "source_label", "VARCHAR(200)")
+    _add_column("topic_clusters", "source_id", "VARCHAR(40)")
+    _add_column("topic_clusters", "source_label", "VARCHAR(200)")
+    _add_column("reports", "source_id", "VARCHAR(40)")
+    _add_column("reports", "source_label", "VARCHAR(200)")
+    _add_column("evaluation_runs", "skipped_count", "INTEGER DEFAULT 0")
+    _add_column("evaluation_runs", "per_question", "JSON")
     for table in WORKSPACE_TABLES:
         _add_column(table, "workspace_id", f"VARCHAR(40) NOT NULL DEFAULT '{DEFAULT_WORKSPACE_ID}'")
     for table in ORGANIZATION_TABLES:
@@ -128,6 +139,59 @@ def _reconcile_organisation_rows() -> None:
     log.info("Moved data for %d organisation(s) into their own default workspace", len(orgs))
 
 
+def _backfill_message_sources(batch: int = 2000) -> None:
+    """Attribute old turns to a source, from the chunks they retrieved.
+
+    Every message already stores the ids of the chunks it retrieved, and every
+    chunk knows its source, so the attribution is recoverable for the whole
+    existing archive rather than only for traffic logged from now on. The best
+    scoring chunk decides: it is the passage the answer leant on hardest.
+
+    Runs once. After the first pass every message has either a source_id or no
+    retrieved chunks at all, so the query below returns nothing.
+    """
+    from app.models import Chunk, Message
+
+    db = SessionLocal()
+    try:
+        pending = (
+            db.query(Message)
+            .filter(Message.source_id.is_(None), Message.retrieved_chunk_ids.isnot(None))
+            .limit(batch)
+            .all()
+        )
+        if not pending:
+            return
+        # One lookup for every chunk any of these messages touched.
+        wanted = {
+            (m.retrieved_chunk_ids or [None])[0]
+            for m in pending
+            if m.retrieved_chunk_ids
+        } - {None}
+        owners = {
+            c.id: (c.source_id, c.source.label if c.source else None)
+            for c in db.query(Chunk).filter(Chunk.id.in_(wanted)).all()
+        }
+        touched = 0
+        for message in pending:
+            ids = message.retrieved_chunk_ids or []
+            if not ids:
+                continue
+            owner = owners.get(ids[0])
+            if owner is None:
+                continue
+            message.source_id, message.source_label = owner
+            touched += 1
+        if touched:
+            db.commit()
+            log.info("Attributed %d existing turns to their knowledge source", touched)
+    except Exception as exc:  # noqa: BLE001 - never block start-up on a backfill
+        log.warning("Could not attribute existing turns to a source: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 def _reset_interrupted_sources() -> None:
     db = SessionLocal()
     try:
@@ -156,4 +220,5 @@ def upgrade() -> None:
     finally:
         db.close()
     _reconcile_organisation_rows()
+    _backfill_message_sources()
     _reset_interrupted_sources()

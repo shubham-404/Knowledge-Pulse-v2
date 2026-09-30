@@ -3,8 +3,10 @@ import clsx from "clsx";
 import { api } from "@/lib/api";
 import { trendCopy, useAsync } from "@/lib/format";
 import type { TrendState } from "@/lib/types";
-import { EmptyState, ErrorState, PageContainer, PageHeader, RefreshButton, RowSkeletons, inputClass } from "@/components/ui";
+import { EmptyState, ErrorState, PageContainer, PageHeader, RefreshButton, RowSkeletons } from "@/components/ui";
 import { InsightList } from "@/components/insights/InsightList";
+import { PeriodFilter, SourceFilter, UnanalysedNotice, useScope } from "@/components/filters";
+import { useToast } from "@/components/toast";
 
 type Filter = "all" | TrendState;
 
@@ -16,45 +18,63 @@ const filters: { key: Filter; label: string }[] = [
 ];
 
 export function InsightsPage() {
-  const periods = useAsync(() => api.getPeriods(), []);
+  const { sourceId, label: sourceLabel, scopes } = useScope();
+  const toast = useToast();
+  const periods = useAsync(() => api.getPeriods({ source: sourceId }), [sourceId]);
   const [period, setPeriod] = useState<string>("");
   const [filter, setFilter] = useState<Filter>("all");
-  const insights = useAsync(() => api.getInsights(period || undefined), [period]);
+  const [running, setRunning] = useState(false);
+  const insights = useAsync(
+    () => api.getInsights({ period: period || undefined, source: sourceId }),
+    [period, sourceId],
+  );
 
-  // Default to the most recent period once the list arrives.
+  // Default to the most recent period, and reset when the source changes: a
+  // period that exists for one site may have no traffic at all on another.
   useEffect(() => {
-    if (!period && periods.data?.length) setPeriod(periods.data[0]);
+    const available = periods.data ?? [];
+    if (!available.length) return;
+    if (!period || !available.some((p) => p.period === period)) setPeriod(available[0].period);
   }, [period, periods.data]);
 
+  const selected = periods.data?.find((p) => p.period === period) ?? null;
   const shown = insights.data?.filter((i) => filter === "all" || i.trend === filter) ?? [];
+
+  async function runForPeriod() {
+    if (!selected) return;
+    setRunning(true);
+    try {
+      await api.runAnalytics({ period: selected.period, source: sourceId });
+      toast(
+        `Clustering ${selected.period} for ${sourceLabel}. Refresh in a minute or two.`,
+        "success",
+      );
+    } catch (e) {
+      toast(`Could not start analytics. ${(e as Error).message}`, "error");
+    } finally {
+      setRunning(false);
+    }
+  }
 
   return (
     <PageContainer>
       <PageHeader
         title="Insights"
-        description="What customers are asking, what is changing, and where the knowledge base appears weakest."
+        description={
+          sourceId
+            ? `What customers asked about ${sourceLabel}, what is changing, and where that site's documentation appears weakest.`
+            : "What customers are asking, what is changing, and where the knowledge base appears weakest."
+        }
         actions={
           <>
-            {periods.data && periods.data.length > 0 && (
-              <label className="flex items-center gap-2 text-small text-ink-soft">
-                <span className="sr-only">Period</span>
-                <select
-                  value={period}
-                  onChange={(e) => setPeriod(e.target.value)}
-                  className={clsx(inputClass, "w-auto py-2 pr-8 text-small")}
-                >
-                  {periods.data.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
+            <SourceFilter />
+            <PeriodFilter periods={periods.data ?? []} value={period} onChange={setPeriod} />
             <RefreshButton onClick={insights.reload} loading={insights.loading} />
           </>
         }
       />
+
+      {selected && <UnanalysedNotice period={selected} onRun={runForPeriod} running={running} />}
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
         {filters.map((f) => (
@@ -81,7 +101,11 @@ export function InsightsPage() {
       {insights.data && insights.data.length === 0 && (
         <EmptyState
           title="No topics for this period"
-          description="Topics appear after the analytics batch has clustered the period's questions. Run analytics from This period, then refresh."
+          description={
+            scopes.length > 1 && sourceId
+              ? `Nothing has been clustered for ${sourceLabel} in this period. Each site is clustered separately, so a site needs its own analytics run.`
+              : "Topics appear after the analytics batch has clustered the period's questions. Run analytics from This period, then refresh."
+          }
         />
       )}
 

@@ -44,6 +44,20 @@ class SourceCreate(Base):
 class ChatRequest(Base):
     question: str
     session_id: str
+    # Answer from one indexed site only. Omitted means every source in the
+    # workspace, which is the old behaviour.
+    source_id: str | None = None
+
+
+class ConversationOut(Base):
+    """One past conversation, enough to list and reopen it."""
+
+    sessionId: str
+    startedAt: datetime
+    lastMessageAt: datetime
+    turnCount: int
+    title: str
+    meanConfidence: float | None = None
 
 
 class MessageOut(Base):
@@ -68,6 +82,8 @@ class InsightOut(Base):
     priority: float
     trend: str
     sampleQueries: list[str]
+    sourceId: str | None = None
+    sourceLabel: str | None = None
 
 
 class TrendPointOut(Base):
@@ -103,9 +119,29 @@ class RecommendationOut(Base):
     faqAnswer: str | None = None
 
 
+class PeriodOut(Base):
+    """One reporting period, and whether the analytics batch has run over it."""
+
+    period: str
+    queryCount: int
+    analysed: bool
+    topicCount: int
+
+
+class ScopeOut(Base):
+    """One knowledge source the archive can be filtered to."""
+
+    sourceId: str | None = None
+    label: str
+    questionCount: int
+    analysed: bool
+
+
 class ReportOut(Base):
     id: str
     period: str
+    sourceId: str | None = None
+    sourceLabel: str | None = None
     generatedAt: datetime
     conversationCount: int
     queryCount: int
@@ -122,10 +158,16 @@ class EvaluationOut(Base):
     answerRelevance: float
     contextRelevance: float
     failures: list[dict]
+    # Questions whose judge calls could not be completed. Reported rather than
+    # scored zero, so a rate-limited run is not mistaken for a bad assistant.
+    skippedCount: int = 0
+    perQuestion: list[dict] = []
+    targets: dict[str, float] = {}
 
 
 class OverviewOut(Base):
     period: str
+    sourceLabel: str | None = None
     conversationCount: int
     queryCount: int
     topicCount: int

@@ -140,6 +140,13 @@ class Message(Base):
     # Assistant turns: the citations exactly as shown, so a conversation reloads
     # intact even after its sources are reindexed and the chunk ids change.
     citations: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # The knowledge source this turn was actually answered from: the source
+    # owning the best-scoring retrieved chunk. Null for turns logged before
+    # source attribution existed, or when nothing was retrieved. This is what
+    # lets one workspace hold several documentation sites and still report on
+    # them separately.
+    source_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    source_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     # Reporting period this turn belongs to, e.g. "2026-08". Set on write so the
     # analytics batch never has to reason about calendars.
@@ -156,6 +163,11 @@ class TopicCluster(Base):
     organization_id: Mapped[str] = _organization_column()
     workspace_id: Mapped[str] = _workspace_column()
     period: Mapped[str] = mapped_column(String(16), index=True)
+    # Which source's traffic this topic was clustered from. Null means the whole
+    # workspace, every source together. A period can hold both: one unscoped set
+    # of topics and one set per source, side by side.
+    source_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    source_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     rank: Mapped[int] = mapped_column(Integer, default=0)
     name: Mapped[str] = mapped_column(Text)
     keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -194,6 +206,8 @@ class Report(Base):
     organization_id: Mapped[str] = _organization_column()
     workspace_id: Mapped[str] = _workspace_column()
     period: Mapped[str] = mapped_column(String(16), index=True)
+    source_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    source_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     conversation_count: Mapped[int] = mapped_column(Integer, default=0)
     query_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -239,6 +253,11 @@ class EvaluationRun(Base):
     answer_relevance: Mapped[float] = mapped_column(Float, default=0.0)
     context_relevance: Mapped[float] = mapped_column(Float, default=0.0)
     failures: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # Questions whose judge calls could not be completed at all (quota, timeout).
+    # Counted and reported rather than silently scored zero, which would make a
+    # rate-limited run look like a bad assistant.
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    per_question: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
 
 # ---- sign-in -------------------------------------------------------------------

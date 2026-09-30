@@ -34,6 +34,32 @@ export interface Message {
   citations?: Citation[];
 }
 
+/** One knowledge source the archive can be filtered to. `sourceId` null is "everything". */
+export interface Scope {
+  sourceId: string | null;
+  label: string;
+  questionCount: number;
+  analysed: boolean;
+}
+
+/** A reporting period, and whether the analytics batch has been run over it. */
+export interface Period {
+  period: string;
+  queryCount: number;
+  analysed: boolean;
+  topicCount: number;
+}
+
+/** One past conversation, enough to list it and reopen it. */
+export interface ConversationSummary {
+  sessionId: string;
+  startedAt: string;
+  lastMessageAt: string;
+  turnCount: number;
+  title: string;
+  meanConfidence: number | null;
+}
+
 export type TrendState = "recurring" | "emerging" | "stable";
 
 export interface Insight {
@@ -49,6 +75,8 @@ export interface Insight {
   priority: number; // 0..1, weighted composite
   trend: TrendState;
   sampleQueries: string[];
+  sourceId?: string | null;
+  sourceLabel?: string | null;
 }
 
 export interface TrendPoint {
@@ -82,6 +110,8 @@ export interface Recommendation {
 export interface Report {
   id: string;
   period: string;
+  sourceId?: string | null;
+  sourceLabel?: string | null;
   generatedAt: string;
   conversationCount: number;
   queryCount: number;
@@ -98,10 +128,23 @@ export interface EvaluationRun {
   answerRelevance: number;
   contextRelevance: number;
   failures: { question: string; metric: string; score: number }[];
+  /** Questions the judge could not complete. Reported, never scored as zero. */
+  skippedCount?: number;
+  perQuestion?: {
+    question: string;
+    confidence: number;
+    retrieved: number;
+    faithfulness: number;
+    answer_relevance: number;
+    context_relevance: number;
+  }[];
+  /** Targets come from the backend so the page and NFR4 cannot drift apart. */
+  targets?: Partial<Record<"faithfulness" | "answerRelevance" | "contextRelevance", number>>;
 }
 
 export interface Overview {
   period: string;
+  sourceLabel?: string | null;
   conversationCount: number;
   queryCount: number;
   topicCount: number;
@@ -115,6 +158,8 @@ export interface Overview {
 export interface ReportSummary {
   id: string;
   period: string;
+  sourceId?: string | null;
+  sourceLabel?: string | null;
   generatedAt: string;
   conversationCount: number;
   queryCount: number;

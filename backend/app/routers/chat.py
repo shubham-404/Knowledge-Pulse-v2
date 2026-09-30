@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Chunk, Conversation, Message, Source, Workspace
 from app.rag import engine
-from app.schemas import ChatRequest, CitationOut, MessageOut
+from app.schemas import ChatRequest, CitationOut, ConversationOut, MessageOut
 from app.workspaces import current_workspace
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -42,6 +43,11 @@ def _citations(db: Session, message: Message) -> list[CitationOut]:
     return out
 
 
+def _utc(value):
+    """SQLite stores naive datetimes; they are UTC, so say so or browsers guess."""
+    return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _out(db: Session, message: Message) -> MessageOut:
     return MessageOut(
         id=message.id,
@@ -56,8 +62,96 @@ def _out(db: Session, message: Message) -> MessageOut:
 
 @router.post("/chat", response_model=MessageOut)
 def chat(payload: ChatRequest, db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
-    message = engine.answer(db, payload.question, payload.session_id, workspace_id=ws.id)
+    if payload.source_id:
+        source = db.get(Source, payload.source_id)
+        if source is None or source.workspace_id != ws.id:
+            raise HTTPException(404, "No knowledge source with that id in this workspace")
+    message = engine.answer(
+        db,
+        payload.question,
+        payload.session_id,
+        workspace_id=ws.id,
+        source_id=payload.source_id,
+    )
     return _out(db, message)
+
+
+CONVERSATION_LIMIT = 50
+TITLE_LENGTH = 70
+
+
+@router.get("/chat/conversations", response_model=list[ConversationOut])
+def conversations(
+    limit: int = Query(CONVERSATION_LIMIT, ge=1, le=200),
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    """Past conversations in this workspace, most recent first.
+
+    Starting a new conversation used to be the end of the old one as far as the
+    interface was concerned: the turns stayed in the database but nothing listed
+    them, so there was no way back. This is that list. Synthetic conversations
+    from the seeding script are left out — there are hundreds of them and none
+    of them were typed by the person reading this.
+
+    The title is the first question asked, which is what anyone would recognise
+    the conversation by.
+    """
+    rows = (
+        db.query(
+            Conversation.session_id,
+            Conversation.started_at,
+            func.max(Message.created_at).label("last_at"),
+            func.count(Message.id).label("turns"),
+            func.avg(Message.confidence).label("confidence"),
+        )
+        .join(Message, Message.conversation_id == Conversation.id)
+        .filter(
+            Conversation.workspace_id == ws.id,
+            Conversation.synthetic.is_(False),
+        )
+        .group_by(Conversation.id, Conversation.session_id, Conversation.started_at)
+        .order_by(func.max(Message.created_at).desc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return []
+
+    # One query for the opening question of each conversation, rather than one
+    # query per conversation.
+    sessions = [r.session_id for r in rows]
+    openers: dict[str, str] = {}
+    first_questions = (
+        db.query(Conversation.session_id, Message.text, Message.created_at)
+        .join(Message, Message.conversation_id == Conversation.id)
+        .filter(
+            Conversation.workspace_id == ws.id,
+            Conversation.session_id.in_(sessions),
+            Message.role == "customer",
+        )
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+    for session_id, text, _ in first_questions:
+        openers.setdefault(session_id, text)
+
+    out = []
+    for row in rows:
+        title = (openers.get(row.session_id) or "New conversation").strip()
+        if len(title) > TITLE_LENGTH:
+            title = title[: TITLE_LENGTH - 1].rstrip() + "\u2026"
+        out.append(
+            ConversationOut(
+                sessionId=row.session_id,
+                startedAt=_utc(row.started_at),
+                lastMessageAt=_utc(row.last_at),
+                turnCount=row.turns,
+                title=title,
+                meanConfidence=round(float(row.confidence), 4) if row.confidence is not None else None,
+            )
+        )
+    return out
 
 
 @router.get("/chat/history", response_model=list[MessageOut])

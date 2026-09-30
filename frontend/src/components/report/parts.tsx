@@ -16,7 +16,14 @@ export function LatestReportCard({ report }: { report: Report }) {
   return (
     <Panel className="p-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="font-display text-h2 font-semibold tracking-tight">{report.period}</h2>
+        <h2 className="font-display text-h2 font-semibold tracking-tight">
+          {report.period}
+          {report.sourceLabel && (
+            <span className="ml-3 align-middle text-small font-normal text-ink-faint">
+              {report.sourceLabel}
+            </span>
+          )}
+        </h2>
         <span className="text-small text-ink-faint">Generated {dateLabel(report.generatedAt)}</span>
       </div>
       <p className="mt-3 max-w-measure text-lead text-ink-soft">{report.summary}</p>
@@ -102,12 +109,16 @@ export function RecommendationsSection({ recommendations }: { recommendations: R
 export function ReportHistory({ reports, currentId }: { reports: ReportSummary[]; currentId?: string }) {
   return (
     <section>
-      <SectionHeader title="Earlier reports" description="One report per reporting period." />
+      <SectionHeader
+        title="Earlier reports"
+        description="One report per reporting period, and one per indexed source within it."
+      />
       <Panel className="overflow-x-auto">
-        <table className="w-full min-w-[40rem] border-collapse text-left">
+        <table className="w-full min-w-[48rem] border-collapse text-left">
           <thead>
             <tr className="border-b border-rule-strong text-micro font-medium text-ink-faint">
               <th scope="col" className="px-4 py-3">Period</th>
+              <th scope="col" className="px-4 py-3">Source</th>
               <th scope="col" className="px-4 py-3">Generated</th>
               <th scope="col" className="px-4 py-3 text-right">Conversations</th>
               <th scope="col" className="px-4 py-3 text-right">Questions</th>
@@ -121,6 +132,9 @@ export function ReportHistory({ reports, currentId }: { reports: ReportSummary[]
                 <td className="whitespace-nowrap px-4 py-3 text-small font-medium">
                   {r.period}
                   {r.id === currentId && <span className="ml-2 text-micro font-normal text-ink-faint">latest</span>}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-small text-ink-soft">
+                  {r.sourceLabel ?? "All sources"}
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 text-small text-ink-soft">{dateLabel(r.generatedAt)}</td>
                 <td className="tabular px-4 py-3 text-right text-small">{r.conversationCount.toLocaleString()}</td>

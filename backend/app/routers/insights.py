@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,9 @@ from app.models import (
     ClusterMember,
     EvaluationRun,
     Message,
+    Recommendation,
     Report,
+    Source,
     TopicCluster,
 )
 from app.schemas import (
@@ -23,8 +25,10 @@ from app.schemas import (
     InsightOut,
     MemberQueryOut,
     OverviewOut,
+    PeriodOut,
     RecommendationOut,
     ReportOut,
+    ScopeOut,
     TrendPointOut,
 )
 from app.workspaces import current_workspace
@@ -32,8 +36,42 @@ from app.workspaces import current_workspace
 router = APIRouter(prefix="/api", tags=["insights"])
 
 
-def _current_period(db: Session, ws: Workspace) -> str | None:
-    return db.query(func.max(TopicCluster.period)).filter(TopicCluster.workspace_id == ws.id).scalar()
+# --------------------------------------------------------------------------
+# Source scope
+# --------------------------------------------------------------------------
+# Every read below takes an optional `source` parameter. It names one indexed
+# knowledge source, and it narrows the whole page to the traffic that source
+# answered. Omitting it means the whole workspace, which is what every caller
+# got before the parameter existed.
+#
+# This is what lets one workspace hold five documentation sites and still show
+# different insights for each. The analytics batch writes one set of rows per
+# scope; these queries read the set that matches.
+
+ALL_SOURCES = "all"
+
+
+def _scope(source: str | None) -> str | None:
+    """Normalise the query parameter. "all", "" and None all mean no narrowing."""
+    if not source or source == ALL_SOURCES:
+        return None
+    return source
+
+
+def _scoped(column, source_id: str | None):
+    """Match rows of exactly one scope, never the union of several."""
+    return column.is_(None) if source_id is None else column == source_id
+
+
+def _current_period(db: Session, ws: Workspace, source_id: str | None = None) -> str | None:
+    return (
+        db.query(func.max(TopicCluster.period))
+        .filter(
+            TopicCluster.workspace_id == ws.id,
+            _scoped(TopicCluster.source_id, source_id),
+        )
+        .scalar()
+    )
 
 
 def _samples(db: Session, cluster_id: str, limit: int) -> list[str]:
@@ -62,6 +100,8 @@ def _insight_out(db: Session, c: TopicCluster) -> InsightOut:
         priority=c.priority,
         trend=c.trend,
         sampleQueries=_samples(db, c.id, 3),
+        sourceId=c.source_id,
+        sourceLabel=c.source_label,
     )
 
 
@@ -69,35 +109,53 @@ def _insight_out(db: Session, c: TopicCluster) -> InsightOut:
 # Overview
 # --------------------------------------------------------------------------
 
+def _questions(db: Session, ws: Workspace, source_id: str | None):
+    """Customer turns in this workspace, narrowed to one source when asked."""
+    q = db.query(Message).filter(Message.workspace_id == ws.id, Message.role == "customer")
+    return q.filter(Message.source_id == source_id) if source_id else q
+
+
 @router.get("/overview", response_model=OverviewOut)
-def overview(db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
-    mine = Message.workspace_id == ws.id
+def overview(
+    source: str | None = None,
+    period: str | None = None,
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    source_id = _scope(source)
+    base = _questions(db, ws, source_id)
     period = (
-        _current_period(db, ws)
-        or db.query(func.max(Message.period)).filter(mine).scalar()
+        period
+        or _current_period(db, ws, source_id)
+        or db.query(func.max(Message.period)).filter(Message.workspace_id == ws.id).scalar()
         or ""
     )
     clusters = (
         db.query(TopicCluster)
-        .filter(TopicCluster.workspace_id == ws.id, TopicCluster.period == period)
+        .filter(
+            TopicCluster.workspace_id == ws.id,
+            TopicCluster.period == period,
+            _scoped(TopicCluster.source_id, source_id),
+        )
         .all()
     )
 
-    questions = db.query(Message).filter(mine, Message.role == "customer", Message.period == period).all()
+    questions = base.filter(Message.period == period).all()
     low = sum(1 for q in questions if (q.confidence or 0) < settings.low_confidence_threshold)
     confidences = [q.confidence for q in questions if q.confidence is not None]
 
     periods = [
         p[0]
-        for p in db.query(Message.period)
-        .filter(mine, Message.role == "customer", Message.period != "")
+        for p in _questions(db, ws, source_id)
+        .with_entities(Message.period)
+        .filter(Message.period != "")
         .distinct()
         .order_by(Message.period)
         .all()
     ]
     volume = []
-    for p in periods[-6:]:
-        rows = db.query(Message).filter(mine, Message.role == "customer", Message.period == p).all()
+    for p in periods[-12:]:
+        rows = base.filter(Message.period == p).all()
         scores = [r.confidence for r in rows if r.confidence is not None]
         volume.append(
             TrendPointOut(
@@ -107,15 +165,16 @@ def overview(db: Session = Depends(get_db), ws: Workspace = Depends(current_work
             )
         )
 
-    conversations = (
-        db.query(func.count(func.distinct(Message.conversation_id)))
-        .filter(mine, Message.period == period)
-        .scalar()
-        or 0
+    conversation_query = db.query(func.count(func.distinct(Message.conversation_id))).filter(
+        Message.workspace_id == ws.id, Message.period == period
     )
+    if source_id:
+        conversation_query = conversation_query.filter(Message.source_id == source_id)
+    conversations = conversation_query.scalar() or 0
 
     return OverviewOut(
         period=period or "No data yet",
+        sourceLabel=_source_label(db, source_id),
         conversationCount=conversations,
         queryCount=len(questions),
         topicCount=len(clusters),
@@ -130,31 +189,123 @@ def overview(db: Session = Depends(get_db), ws: Workspace = Depends(current_work
 # Insights
 # --------------------------------------------------------------------------
 
-@router.get("/periods", response_model=list[str])
-def list_periods(db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
-    """Periods that have been analysed, newest first."""
-    rows = (
-        db.query(TopicCluster.period)
-        .filter(TopicCluster.workspace_id == ws.id)
-        .distinct()
-        .order_by(TopicCluster.period.desc())
+def _source_label(db: Session, source_id: str | None) -> str | None:
+    if not source_id:
+        return None
+    source = db.get(Source, source_id)
+    return source.label if source else source_id
+
+
+@router.get("/periods", response_model=list[PeriodOut])
+def list_periods(
+    source: str | None = None,
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    """Every period that has logged questions, newest first.
+
+    This used to list only the periods the analytics batch had already been run
+    over, which made an unanalysed month invisible rather than actionable: there
+    was no way to tell "no traffic in July" from "July was never clustered".
+    Each row now carries its question count and whether it has been analysed, so
+    the interface can offer to run the batch for the ones that have not.
+    """
+    source_id = _scope(source)
+
+    volumes = dict(
+        _questions(db, ws, source_id)
+        .with_entities(Message.period, func.count(Message.id))
+        .filter(Message.period != "")
+        .group_by(Message.period)
         .all()
     )
-    return [r[0] for r in rows]
+    topics = dict(
+        db.query(TopicCluster.period, func.count(TopicCluster.id))
+        .filter(
+            TopicCluster.workspace_id == ws.id,
+            _scoped(TopicCluster.source_id, source_id),
+        )
+        .group_by(TopicCluster.period)
+        .all()
+    )
+
+    return [
+        PeriodOut(
+            period=p,
+            queryCount=volumes.get(p, 0),
+            analysed=topics.get(p, 0) > 0,
+            topicCount=topics.get(p, 0),
+        )
+        for p in sorted(set(volumes) | set(topics), reverse=True)
+    ]
+
+
+@router.get("/scopes", response_model=list[ScopeOut])
+def list_scopes(db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
+    """The knowledge sources the archive can be filtered to, plus the whole workspace.
+
+    Only sources that have actually answered something appear: a site indexed an
+    hour ago with no traffic yet has nothing to report on, and offering it as a
+    filter that yields an empty page is worse than leaving it out.
+    """
+    counts = dict(
+        db.query(Message.source_id, func.count(Message.id))
+        .filter(Message.workspace_id == ws.id, Message.role == "customer")
+        .group_by(Message.source_id)
+        .all()
+    )
+    analysed = {
+        row[0]
+        for row in db.query(TopicCluster.source_id)
+        .filter(TopicCluster.workspace_id == ws.id)
+        .distinct()
+        .all()
+    }
+
+    scopes = [
+        ScopeOut(
+            sourceId=None,
+            label="All sources",
+            questionCount=sum(counts.values()),
+            analysed=None in analysed,
+        )
+    ]
+    labels = {
+        s.id: s.label
+        for s in db.query(Source).filter(Source.workspace_id == ws.id).all()
+    }
+    for source_id, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if not source_id:
+            continue
+        scopes.append(
+            ScopeOut(
+                sourceId=source_id,
+                label=labels.get(source_id, "Deleted source"),
+                questionCount=count,
+                analysed=source_id in analysed,
+            )
+        )
+    return scopes
 
 
 @router.get("/insights", response_model=list[InsightOut])
 def list_insights(
     period: str | None = None,
+    source: str | None = None,
     db: Session = Depends(get_db),
     ws: Workspace = Depends(current_workspace),
 ):
-    period = period or _current_period(db, ws)
+    source_id = _scope(source)
+    period = period or _current_period(db, ws, source_id)
     if not period:
         return []
     rows = (
         db.query(TopicCluster)
-        .filter(TopicCluster.workspace_id == ws.id, TopicCluster.period == period)
+        .filter(
+            TopicCluster.workspace_id == ws.id,
+            TopicCluster.period == period,
+            _scoped(TopicCluster.source_id, source_id),
+        )
         .order_by(TopicCluster.rank)
         .all()
     )
@@ -229,10 +380,12 @@ def get_insight(insight_id: str, db: Session = Depends(get_db), ws: Workspace = 
 # Reports
 # --------------------------------------------------------------------------
 
-def _report_out(report: Report) -> ReportOut:
+def _report_out(report: Report, categories: set[str] | None = None) -> ReportOut:
     return ReportOut(
         id=report.id,
         period=report.period,
+        sourceId=report.source_id,
+        sourceLabel=report.source_label,
         generatedAt=report.generated_at,
         conversationCount=report.conversation_count,
         queryCount=report.query_count,
@@ -253,35 +406,132 @@ def _report_out(report: Report) -> ReportOut:
                 faqAnswer=r.faq_answer,
             )
             for r in report.recommendations
+            if categories is None or r.category in categories
         ],
     )
 
 
+CATEGORIES = {"product", "documentation", "faq", "customer_issue"}
+
+
+def _categories(raw: str | None) -> set[str] | None:
+    """Parse the category filter. Unknown names are rejected rather than ignored,
+    so a typo returns an error instead of an empty report."""
+    if not raw:
+        return None
+    wanted = {c.strip() for c in raw.split(",") if c.strip()}
+    unknown = wanted - CATEGORIES
+    if unknown:
+        raise HTTPException(400, f"Unknown recommendation category: {', '.join(sorted(unknown))}")
+    return wanted or None
+
+
+def _reports(db: Session, ws: Workspace, period: str | None, source: str | None) -> list[Report]:
+    source_id = _scope(source)
+    query = db.query(Report).filter(
+        Report.workspace_id == ws.id,
+        _scoped(Report.source_id, source_id),
+    )
+    if period:
+        query = query.filter(Report.period == period)
+    return query.order_by(Report.period.desc()).all()
+
+
 @router.get("/reports/latest", response_model=ReportOut)
-def latest_report(db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
-    report = db.query(Report).filter(Report.workspace_id == ws.id).order_by(Report.period.desc()).first()
-    if report is None:
-        raise HTTPException(404, "No report yet. Run the analytics batch first.")
-    return _report_out(report)
+def latest_report(
+    source: str | None = None,
+    period: str | None = None,
+    categories: str | None = None,
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    rows = _reports(db, ws, period, source)
+    if not rows:
+        scope = _source_label(db, _scope(source))
+        raise HTTPException(
+            404,
+            f"No report for {period or 'the latest period'}"
+            + (f" on {scope}." if scope else ".")
+            + " Run the analytics batch for this period and source first.",
+        )
+    return _report_out(rows[0], _categories(categories))
 
 
 @router.get("/reports", response_model=list[ReportOut])
-def list_reports(db: Session = Depends(get_db), ws: Workspace = Depends(current_workspace)):
-    rows = db.query(Report).filter(Report.workspace_id == ws.id).order_by(Report.period.desc()).all()
-    return [_report_out(r) for r in rows]
+def list_reports(
+    source: str | None = None,
+    period: str | None = None,
+    categories: str | None = None,
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    wanted = _categories(categories)
+    return [_report_out(r, wanted) for r in _reports(db, ws, period, source)]
+
+
+@router.get("/reports/export.pdf", response_class=Response)
+def export_report_pdf(
+    source: str | None = None,
+    period: str | None = None,
+    categories: str | None = None,
+    everyPeriod: bool = Query(False, description="Include every period, not just the latest"),
+    db: Session = Depends(get_db),
+    ws: Workspace = Depends(current_workspace),
+):
+    """The filtered report as a downloadable PDF.
+
+    Same filters as the page, so what is downloaded is what is on screen. The
+    filters themselves are printed on the first page: a report that does not say
+    what it covers is a report nobody can check later.
+    """
+    from app.reporting import render_report_pdf
+
+    wanted = _categories(categories)
+    rows = _reports(db, ws, period, source)
+    if not everyPeriod:
+        rows = rows[:1]
+
+    recommendations = {
+        report.id: [
+            r for r in report.recommendations if wanted is None or r.category in wanted
+        ]
+        for report in rows
+    }
+
+    pdf = render_report_pdf(
+        rows,
+        recommendations,
+        filters={
+            "Source": _source_label(db, _scope(source)) or "All sources",
+            "Period": period or ("every period" if everyPeriod else "latest"),
+            "Categories": ", ".join(sorted(wanted)) if wanted else "all four",
+        },
+        workspace_name=ws.name,
+    )
+
+    scope = (_source_label(db, _scope(source)) or "all-sources").lower().replace(" ", "-")
+    stamp = period or (rows[0].period if rows else "empty")
+    filename = f"knowledgepulse-{scope}-{stamp}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # --------------------------------------------------------------------------
 # Batch trigger
 # --------------------------------------------------------------------------
 
-def _run_batch_task(period: str | None, workspace_id: str) -> None:
+def _run_batch_task(period: str | None, workspace_id: str, source_id: str | None) -> None:
     db = SessionLocal()
     try:
         if period:
-            batch.run_batch(db, period, workspace_id)
+            batch.run_batch(db, period, workspace_id, source_id)
         else:
-            batch.run_for_all_periods(db, workspace_id)
+            # No period named: every period, and every source within it, so one
+            # run brings the whole archive up to date.
+            batch.run_for_all_periods(db, workspace_id, per_source=True)
     finally:
         db.close()
 
@@ -290,11 +540,22 @@ def _run_batch_task(period: str | None, workspace_id: str) -> None:
 def trigger_batch(
     tasks: BackgroundTasks,
     period: str | None = None,
+    source: str | None = None,
     ws: Workspace = Depends(current_workspace),
 ):
-    """Kick off the analytics batch. Returns immediately; it takes minutes."""
-    tasks.add_task(_run_batch_task, period, ws.id)
-    return {"status": "started", "period": period or "all periods"}
+    """Kick off the analytics batch. Returns immediately; it takes minutes.
+
+    With no period it runs every period that has traffic, for the workspace as a
+    whole and once per source. Name a period to redo just that one, and a source
+    to redo just that site within it.
+    """
+    source_id = _scope(source)
+    tasks.add_task(_run_batch_task, period, ws.id, source_id)
+    return {
+        "status": "started",
+        "period": period or "all periods",
+        "source": source_id or "all sources",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -319,4 +580,11 @@ def latest_evaluation(db: Session = Depends(get_db), ws: Workspace = Depends(cur
         answerRelevance=run.answer_relevance,
         contextRelevance=run.context_relevance,
         failures=run.failures or [],
+        skippedCount=run.skipped_count or 0,
+        perQuestion=run.per_question or [],
+        targets={
+            "faithfulness": settings.eval_target_faithfulness,
+            "answerRelevance": settings.eval_target_answer_relevance,
+            "contextRelevance": settings.eval_target_context_relevance,
+        },
     )

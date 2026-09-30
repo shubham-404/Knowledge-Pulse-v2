@@ -64,21 +64,36 @@ def delete_source(source_id: str) -> None:
     _get_collection().delete(where={"source_id": source_id})
 
 
-def _where(workspace_id: str | None, organization_id: str | None) -> dict | None:
-    """Chroma filter for a tenant. $and needs two or more clauses, hence the cases."""
+def _where(
+    workspace_id: str | None,
+    organization_id: str | None,
+    source_id: str | None = None,
+) -> dict | None:
+    """Chroma filter for a tenant, optionally narrowed to one source.
+
+    $and needs two or more clauses, hence the cases. The source clause is what
+    lets a single workspace hold five documentation sites and still answer from
+    exactly one of them.
+    """
     clauses = []
     if workspace_id:
         clauses.append({"workspace_id": {"$eq": workspace_id}})
     if organization_id:
         clauses.append({"organization_id": {"$eq": organization_id}})
+    if source_id:
+        clauses.append({"source_id": {"$eq": source_id}})
     if not clauses:
         return None
     return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
 
-def count(workspace_id: str | None = None, organization_id: str | None = None) -> int:
+def count(
+    workspace_id: str | None = None,
+    organization_id: str | None = None,
+    source_id: str | None = None,
+) -> int:
     collection = _get_collection()
-    where = _where(workspace_id, organization_id)
+    where = _where(workspace_id, organization_id, source_id)
     if where is None:
         return collection.count()
     return len(collection.get(where=where, include=[])["ids"])
@@ -129,21 +144,32 @@ def backfill_tenancy(
 
 
 def search(
-    vector, top_k: int, workspace_id: str | None = None, organization_id: str | None = None
+    vector,
+    top_k: int,
+    workspace_id: str | None = None,
+    organization_id: str | None = None,
+    source_id: str | None = None,
+    fetch_multiplier: int = 1,
 ) -> list[dict]:
     """Return the top-k chunks with cosine similarity in [0, 1], best first.
 
     Filtered to one workspace of one organisation, so a profile can never answer
-    from another's sources, and a tenant never from another tenant's.
+    from another's sources, and a tenant never from another tenant's. Narrow
+    further with source_id to answer from a single documentation site.
+
+    fetch_multiplier over-fetches so the caller can drop near-duplicate chunks
+    and still be left with top_k distinct passages. Overlapping windows and two
+    sites that republish the same page both produce duplicates, and five copies
+    of one paragraph at five different scores is not five pieces of evidence.
     """
     collection = _get_collection()
-    where = _where(workspace_id, organization_id)
-    available = count(workspace_id, organization_id)
+    where = _where(workspace_id, organization_id, source_id)
+    available = count(workspace_id, organization_id, source_id)
     if available == 0:
         return []
     res = collection.query(
         query_embeddings=[vector.tolist()],
-        n_results=min(top_k, available),
+        n_results=min(top_k * max(1, fetch_multiplier), available),
         where=where,
         include=["documents", "metadatas", "distances"],
     )

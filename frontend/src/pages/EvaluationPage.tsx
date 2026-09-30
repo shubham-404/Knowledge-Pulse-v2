@@ -1,7 +1,13 @@
 import { api } from "@/lib/api";
 import { useAsync } from "@/lib/format";
 import { EmptyState, MetricSkeletons, PageContainer, PageHeader, RefreshButton, RowSkeletons } from "@/components/ui";
-import { EvaluationFailures, EvaluationMetadata, EvaluationMetricGrid } from "@/components/evaluation/parts";
+import {
+  EvaluationFailures,
+  EvaluationMetadata,
+  EvaluationMetricGrid,
+  HowScoringWorks,
+  SampleNotice,
+} from "@/components/evaluation/parts";
 
 export function EvaluationPage() {
   const { data, error, loading, reload } = useAsync(() => api.getEvaluation(), []);
@@ -32,7 +38,9 @@ export function EvaluationPage() {
       {data && (
         <div className="space-y-10">
           <EvaluationMetricGrid run={data} />
+          <SampleNotice run={data} />
           {data.failures.length > 0 && <EvaluationFailures failures={data.failures} />}
+          <HowScoringWorks run={data} />
         </div>
       )}
     </PageContainer>

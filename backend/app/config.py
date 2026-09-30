@@ -61,6 +61,10 @@ class Settings(BaseSettings):
 
     # --- Retrieval -------------------------------------------------------
     retrieval_top_k: int = 5
+    # Ask the vector store for this many times top_k, then drop near-duplicate
+    # passages and keep the first top_k that remain. Overlapping windows and two
+    # sites carrying the same page otherwise fill the citation list with copies.
+    retrieval_fetch_multiplier: int = 3
     # Confidence blends the single best match with the spread of the rest, so a
     # lucky one-off hit surrounded by noise does not read as high confidence.
     confidence_top_weight: float = 0.6
@@ -75,6 +79,18 @@ class Settings(BaseSettings):
     topic_match_threshold: float = 0.72
     emerging_growth_threshold: float = 0.60
     emerging_max_previous: int = 25
+
+    # --- Evaluation ------------------------------------------------------
+    # A judge call that fails (quota, timeout, unparseable reply) is retried
+    # this many times before the question is dropped from the run. It is never
+    # scored zero: a rate-limited run would otherwise read as a bad assistant.
+    eval_judge_retries: int = 3
+    eval_pause_seconds: float = 2.0
+    # NFR4. Faithfulness is the one the report commits to; the other two are
+    # reported against their own targets.
+    eval_target_faithfulness: float = 0.80
+    eval_target_answer_relevance: float = 0.80
+    eval_target_context_relevance: float = 0.80
 
     # Priority weights: volume, growth, confidence deficit, severity.
     w_volume: float = 0.30

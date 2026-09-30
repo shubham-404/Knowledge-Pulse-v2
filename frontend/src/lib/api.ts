@@ -5,6 +5,7 @@
 // variable and every screen switches over. Nothing else in the app changes.
 
 import {
+  mockConversations,
   mockEvaluation,
   mockInsightDetail,
   mockInsights,
@@ -13,6 +14,7 @@ import {
   mockReport,
   mockReportHistory,
   mockResearch,
+  mockScopes,
   mockSources,
   mockWorkspaces,
 } from "@/mock/data";
@@ -21,14 +23,17 @@ import type {
   AuthUser,
   BackendState,
   Citation,
+  ConversationSummary,
   EvaluationRun,
   Insight,
   InsightDetail,
   Message,
   Overview,
+  Period,
   Report,
   ReportSummary,
   ResearchSummary,
+  Scope,
   Source,
   SourceKind,
   Workspace,
@@ -163,6 +168,29 @@ async function send<T>(method: "POST" | "PATCH" | "DELETE", path: string, body?:
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/**
+ * The filters every analytics read shares. `source` names one indexed site and
+ * narrows the whole page to the traffic it answered; omitting it means the
+ * whole workspace. Empty values are dropped rather than sent as blanks, so a
+ * cleared filter produces the unfiltered URL the backend already handles.
+ */
+export interface AnalyticsFilters {
+  source?: string | null;
+  period?: string | null;
+  categories?: string[];
+  everyPeriod?: boolean;
+}
+
+function filterQuery(filters: AnalyticsFilters = {}): string {
+  const params = new URLSearchParams();
+  if (filters.source) params.set("source", filters.source);
+  if (filters.period) params.set("period", filters.period);
+  if (filters.categories?.length) params.set("categories", filters.categories.join(","));
+  if (filters.everyPeriod) params.set("everyPeriod", "true");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 const kindFromFilename = (name: string): SourceKind => {
   const ext = name.split(".").pop()?.toLowerCase();
   if (ext === "pdf") return "pdf";
@@ -273,7 +301,11 @@ export const api = {
 
   getResearch: () => get<ResearchSummary>("/api/research/latest", mockResearch),
 
-  getOverview: () => get<Overview>("/api/overview", mockOverview),
+  getOverview: (filters: AnalyticsFilters = {}) =>
+    get<Overview>(`/api/overview${filterQuery(filters)}`, mockOverview),
+
+  /** The knowledge sources the archive can be filtered to, newest traffic first. */
+  getScopes: () => get<Scope[]>("/api/scopes", mockScopes),
 
   /** Reachability check for the Sources page. Never throws. */
   getHealth: async (): Promise<BackendState> => {
@@ -359,18 +391,24 @@ export const api = {
 
   // ---- analytics -----------------------------------------------------------
 
-  runAnalytics: async () => {
+  /**
+   * Kick off the batch. With no period it runs every period that has traffic,
+   * for the workspace as a whole and once per source, which is what makes the
+   * per-site insights appear.
+   */
+  runAnalytics: async (filters: AnalyticsFilters = {}) => {
     if (usingMockData) {
       await delay(1200);
       return;
     }
-    await send<unknown>("POST", "/api/analytics/run");
+    await send<unknown>("POST", `/api/analytics/run${filterQuery(filters)}`);
   },
 
-  getPeriods: () => get<string[]>("/api/periods", mockPeriods),
+  getPeriods: (filters: AnalyticsFilters = {}) =>
+    get<Period[]>(`/api/periods${filterQuery(filters)}`, mockPeriods),
 
-  getInsights: (period?: string) =>
-    get<Insight[]>(`/api/insights${period ? `?period=${encodeURIComponent(period)}` : ""}`, mockInsights),
+  getInsights: (filters: AnalyticsFilters = {}) =>
+    get<Insight[]>(`/api/insights${filterQuery(filters)}`, mockInsights),
 
   getInsight: async (id: string) => {
     if (usingMockData) {
@@ -401,13 +439,55 @@ export const api = {
 
   // ---- reports and evaluation ---------------------------------------------
 
-  getReport: () => get<Report>("/api/reports/latest", mockReport),
+  getReport: (filters: AnalyticsFilters = {}) =>
+    get<Report>(`/api/reports/latest${filterQuery(filters)}`, mockReport),
 
-  getReports: () => get<ReportSummary[]>("/api/reports", mockReportHistory),
+  getReports: (filters: AnalyticsFilters = {}) =>
+    get<ReportSummary[]>(`/api/reports${filterQuery(filters)}`, mockReportHistory),
+
+  /**
+   * Download the filtered report as a PDF.
+   *
+   * fetch rather than pointing the browser at the URL, because the endpoint
+   * needs the bearer token and a plain link cannot carry one. The blob is
+   * handed to a temporary anchor and revoked straight after, so nothing is
+   * left holding the file in memory.
+   */
+  downloadReportPdf: async (filters: AnalyticsFilters = {}): Promise<string> => {
+    if (usingMockData) {
+      await delay(700);
+      throw new Error("Connect the backend to download a PDF. Placeholder data has no report to render.");
+    }
+    const res = await fetch(`${BASE}/api/reports/export.pdf${filterQuery(filters)}`, {
+      headers: authHeaders(),
+    });
+    if (!res.ok) throw await failed(res);
+
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    const name = /filename="?([^"]+)"?/.exec(disposition)?.[1] ?? "knowledgepulse-report.pdf";
+    const url = URL.createObjectURL(await res.blob());
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    return name;
+  },
 
   getEvaluation: () => get<EvaluationRun>("/api/evaluation/latest", mockEvaluation),
 
   // ---- chat ----------------------------------------------------------------
+
+  /** Past conversations in this workspace, most recent first. */
+  getConversations: async (): Promise<ConversationSummary[]> => {
+    if (usingMockData) {
+      await delay(200);
+      return [...mockConversations];
+    }
+    return get<ConversationSummary[]>("/api/chat/conversations", []);
+  },
 
   getChatHistory: async (sessionId: string): Promise<Message[]> => {
     if (usingMockData) {
@@ -417,7 +497,7 @@ export const api = {
     return get<Message[]>(`/api/chat/history?session_id=${encodeURIComponent(sessionId)}`, []);
   },
 
-  ask: async (question: string, sessionId: string): Promise<Message> => {
+  ask: async (question: string, sessionId: string, sourceId?: string | null): Promise<Message> => {
     if (usingMockData) {
       await delay(900);
       const turn: Message = { id: `msg_q_${Date.now()}`, role: "customer", text: question, createdAt: new Date().toISOString() };
@@ -449,6 +529,10 @@ export const api = {
       mockHistory.set(sessionId, [...(mockHistory.get(sessionId) ?? []), turn, reply]);
       return reply;
     }
-    return send<Message>("POST", "/api/chat", { question, session_id: sessionId });
+    return send<Message>("POST", "/api/chat", {
+      question,
+      session_id: sessionId,
+      source_id: sourceId || null,
+    });
   },
 };

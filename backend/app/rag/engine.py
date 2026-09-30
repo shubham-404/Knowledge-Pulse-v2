@@ -60,6 +60,64 @@ def compute_confidence(similarities: list[float]) -> float:
     return round(max(0.0, min(1.0, w * top + (1 - w) * mean)), 4)
 
 
+def _fingerprint(text: str, words: int = 24) -> str:
+    """A cheap identity for a passage: its first `words` significant words.
+
+    Two chunks cut from the same paragraph by overlapping windows, and the same
+    page republished under two sources, both collapse to the same fingerprint.
+    Comparing whole texts would miss both, because the tails differ.
+    """
+    tokens = [t for t in "".join(c.lower() if c.isalnum() else " " for c in text).split() if t]
+    return " ".join(tokens[:words])
+
+
+def deduplicate(hits: list[dict], top_k: int) -> list[dict]:
+    """Collapse hits that are the same passage, keeping the best-scoring copy.
+
+    Three things make one retrieval return the same material more than once:
+    overlapping chunk windows, a section long enough to be split into several
+    chunks that all match, and two indexed sites that carry the same page. Each
+    produced a separate citation with its own similarity number, which read as
+    several independent sources agreeing when it was one source repeated.
+
+    Hits arrive best-first, so the first copy seen is the one kept, and the
+    later ones are recorded against it rather than thrown away.
+    """
+    kept: list[dict] = []
+    by_section: dict[tuple, dict] = {}
+    by_text: dict[str, dict] = {}
+
+    for hit in hits:
+        meta = hit.get("meta") or {}
+        section = (
+            meta.get("source_id"),
+            meta.get("url") or "",
+            meta.get("heading_path") or "",
+        )
+        fingerprint = _fingerprint(hit["text"])
+
+        existing = by_section.get(section) or by_text.get(fingerprint)
+        if existing is not None:
+            existing["duplicate_count"] = existing.get("duplicate_count", 1) + 1
+            continue
+
+        hit["duplicate_count"] = 1
+        by_section[section] = hit
+        by_text[fingerprint] = hit
+        kept.append(hit)
+        if len(kept) >= top_k:
+            break
+    return kept
+
+
+def attribution(hits: list[dict]) -> tuple[str | None, str | None]:
+    """The source the answer leant on hardest: the owner of the best chunk."""
+    if not hits:
+        return None, None
+    meta = hits[0].get("meta") or {}
+    return meta.get("source_id"), meta.get("source_label")
+
+
 def build_prompt(question: str, hits: list[dict]) -> str:
     passages = []
     for n, hit in enumerate(hits, start=1):
@@ -80,6 +138,7 @@ def answer(
     synthetic: bool = False,
     created_at: datetime | None = None,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
+    source_id: str | None = None,
 ) -> Message:
     """Answer one question and persist both turns. Returns the assistant message.
 
@@ -109,14 +168,20 @@ def answer(
 
     # --- retrieve -------------------------------------------------------
     query_vector = embeddings.embed_one(question)
-    hits = vector_store.search(
-        query_vector,
+    hits = deduplicate(
+        vector_store.search(
+            query_vector,
+            settings.retrieval_top_k,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            source_id=source_id,
+            fetch_multiplier=settings.retrieval_fetch_multiplier,
+        ),
         settings.retrieval_top_k,
-        workspace_id=workspace_id,
-        organization_id=organization_id,
     )
     similarities = [h["similarity"] for h in hits]
     confidence = compute_confidence(similarities)
+    answered_from, answered_from_label = attribution(hits)
 
     # --- log the customer turn ------------------------------------------
     db.add(
@@ -130,6 +195,8 @@ def answer(
             confidence=confidence,  # carried on the query too, so clustering can use it
             retrieved_chunk_ids=[h["chunk_id"] for h in hits],
             retrieved_scores=similarities,
+            source_id=answered_from,
+            source_label=answered_from_label,
             created_at=created_at,
             period=period,
         )
@@ -174,6 +241,8 @@ def answer(
         retrieved_chunk_ids=[h["chunk_id"] for h in hits],
         retrieved_scores=similarities,
         citations=citations,
+        source_id=answered_from,
+        source_label=answered_from_label,
         created_at=created_at,
         period=period,
     )
@@ -186,12 +255,22 @@ def retrieve_only(
     question: str,
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     organization_id: str | None = None,
+    source_id: str | None = None,
 ) -> tuple[list[dict], float]:
-    """Used by the evaluation harness, which needs context without logging a turn."""
-    hits = vector_store.search(
-        embeddings.embed_one(question),
+    """Used by the evaluation harness, which needs context without logging a turn.
+
+    Deduplicated exactly as the chat path is, so the evaluation scores the
+    context the assistant would really have been given.
+    """
+    hits = deduplicate(
+        vector_store.search(
+            embeddings.embed_one(question),
+            settings.retrieval_top_k,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            source_id=source_id,
+            fetch_multiplier=settings.retrieval_fetch_multiplier,
+        ),
         settings.retrieval_top_k,
-        workspace_id=workspace_id,
-        organization_id=organization_id,
     )
     return hits, compute_confidence([h["similarity"] for h in hits])

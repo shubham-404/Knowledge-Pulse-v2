@@ -13,6 +13,133 @@ export const chunkerCopy: Record<string, { label: string; note: string; colour: 
   heading_ctx: { label: "Heading + path", note: "Heading-aware, with the heading path embedded", colour: palette.oxblood },
 };
 
+/**
+ * What every metric on this page means, twice: once in the language of the
+ * field, once in the language of someone who has not read the papers. Visitors
+ * arrive at a table of numbers with no way in, and "MRR 0.572" tells them
+ * nothing on its own.
+ *
+ * Keyed by the column key used in the tables below, so a column and its
+ * definition cannot drift apart.
+ */
+export const glossary: Record<string, { term: string; technical: string; plain: string }> = {
+  chunks: {
+    term: "Chunks",
+    technical: "Number of retrievable units the chunker produced from the frozen page snapshot.",
+    plain:
+      "How many pieces the documentation was cut into. Smaller pieces mean more of them, and more chances to match a question — but each piece carries less context around the answer.",
+  },
+  hit1: {
+    term: "Hit@1",
+    technical: "Fraction of questions whose top-ranked chunk is relevant to the gold passage.",
+    plain:
+      "How often the very first result was the right one. This is what matters if you only ever read the top answer.",
+  },
+  hitk: {
+    term: "Hit@5",
+    technical: "Fraction of questions with at least one relevant chunk in the top 5 retrieved.",
+    plain:
+      "How often the right material showed up anywhere in the five passages the assistant was given. The assistant reads all five, so this is closer to what it actually has to work with than Hit@1.",
+  },
+  mrr: {
+    term: "MRR",
+    technical:
+      "Mean Reciprocal Rank: the average of 1/rank of the first relevant chunk, 0 when none is retrieved.",
+    plain:
+      "How near the top the right answer tends to land. First place scores 1, second scores 0.5, third 0.33, and nothing scores 0. One number that rewards being right and being early, so a chunker that buries the answer at rank five is separated from one that leads with it.",
+  },
+  recallk: {
+    term: "Recall@5",
+    technical:
+      "Proportion of the gold passage covered by the union of the top 5 chunks, measured on overlapping word 3-grams.",
+    plain:
+      "How much of the real answer the five passages contain between them. This is the one that catches a chunker which sliced an answer in half: each half alone looks like a poor match, but together they cover the passage, and only Recall sees that.",
+  },
+  page: {
+    term: "Page hit@5",
+    technical: "Fraction of questions where at least one retrieved chunk comes from the gold page.",
+    plain:
+      "How often retrieval at least landed on the right page, even if it grabbed the wrong paragraph of it. A high page hit with a low Hit@5 means the search is finding the right topic and the chunker is cutting it badly.",
+  },
+  ctx: {
+    term: "Context words",
+    technical: "Mean total words across the top 5 retrieved chunks, per question.",
+    plain:
+      "How much text the assistant has to read for one question. Lower is better at equal accuracy: it is cheaper, faster, and gives the model less irrelevant material to get distracted by.",
+  },
+  ca: {
+    term: "Confidence, answerable",
+    technical: "Mean retrieval confidence on questions the site's own documentation answers.",
+    plain: "How sure the system is when the answer really is in the docs. Should be high.",
+  },
+  cu: {
+    term: "Confidence, unanswerable",
+    technical:
+      "Mean retrieval confidence on questions borrowed from other sites, which this corpus cannot answer.",
+    plain:
+      "How sure the system is when the answer is not there at all. Should be low. The gap between this and the column before it is the whole knowledge-gap signal.",
+  },
+  auroc: {
+    term: "Gap AUROC",
+    technical:
+      "Area under the ROC curve for confidence as a classifier of answerable versus unanswerable questions.",
+    plain:
+      "The chance that a random answerable question scores higher confidence than a random unanswerable one. 1.0 means the two never overlap and the system always knows what it does not know; 0.5 means coin-flip and the confidence score is worthless. This is the number that decides whether the insights layer can trust low confidence as evidence of a documentation gap.",
+  },
+  fg: {
+    term: "False gaps",
+    technical: "Answerable questions whose confidence falls below τ and are flagged as gaps anyway.",
+    plain:
+      "Documented things wrongly reported as missing. Too many of these and the client is sent to rewrite pages that were already fine.",
+  },
+  mg: {
+    term: "Missed gaps",
+    technical: "Unanswerable questions whose confidence sits above τ and pass unflagged.",
+    plain:
+      "Real holes in the documentation that slipped through unreported. Too many of these and the system quietly stops earning its keep.",
+  },
+  tau: {
+    term: "Best τ",
+    technical:
+      "The confidence threshold maximising balanced accuracy on this site and configuration.",
+    plain:
+      "Where the line between 'answered' and 'gap' should sit for this site. If the best line is roughly the same everywhere, one setting can serve new organisations without tuning.",
+  },
+  mean: {
+    term: "Mean words",
+    technical: "Mean chunk length in words.",
+    plain: "The typical size of a piece. Compare it against the size the chunker was asked for.",
+  },
+  p10: {
+    term: "P10 words",
+    technical: "10th percentile of chunk length.",
+    plain: "Nine chunks in ten are longer than this. A very low figure means a tail of scraps.",
+  },
+  p90: {
+    term: "P90 words",
+    technical: "90th percentile of chunk length.",
+    plain: "Nine chunks in ten are shorter than this. Read with P10, it shows how even the cuts are.",
+  },
+  tiny: {
+    term: "Tiny chunks",
+    technical: "Proportion of chunks under 50 words.",
+    plain:
+      "Fragments too short to answer anything — a stray heading, a one-line note. They clutter the index and can crowd out a real passage in the top five.",
+  },
+  cross: {
+    term: "Cross-section",
+    technical: "Proportion of chunks spanning a heading boundary.",
+    plain:
+      "Pieces that run across a heading, so they end up half about one thing and half about another. A match on such a chunk is half wasted context, which is exactly the failure [L4] identifies.",
+  },
+  code: {
+    term: "Code blocks split",
+    technical: "Proportion of code blocks divided across a chunk boundary.",
+    plain:
+      "Code examples cut in two. Half a snippet retrieved on its own is worse than useless in developer documentation: it looks like an answer and will not run.",
+  },
+};
+
 const label = (chunker: string) => chunkerCopy[chunker]?.label ?? chunker;
 const num = (v: number | null | undefined, digits = 3) => (v == null ? "–" : v.toFixed(digits));
 const share = (v: number | null | undefined) => (v == null ? "–" : pct(v, 1));
@@ -156,6 +283,65 @@ interface Column {
   better?: "high" | "low";
 }
 
+/**
+ * A column heading that can explain itself. The definition is in a <details>
+ * rather than a title attribute so it works on touch, stays open while it is
+ * read, and is reachable by keyboard — a tooltip meets none of those.
+ */
+function ColumnHeading({ column }: { column: Column }) {
+  const entry = glossary[column.key];
+  if (!entry) return <>{column.label}</>;
+  return (
+    <details className="group relative inline-block text-right">
+      <summary className="cursor-help list-none underline decoration-dotted decoration-from-font underline-offset-4 hover:text-ink">
+        {column.label}
+        <span className="sr-only"> — show what this measures</span>
+      </summary>
+      <div className="absolute right-0 top-full z-20 mt-1.5 w-72 rounded-md border border-rule-strong bg-paper-raised p-3 text-left shadow-lg">
+        <p className="text-small font-medium text-ink">{entry.term}</p>
+        <p className="mt-1.5 text-micro text-ink-soft">{entry.technical}</p>
+        <p className="mt-2 border-t border-rule pt-2 text-micro text-ink-soft">{entry.plain}</p>
+        {column.better && (
+          <p className="mt-2 text-micro text-ink-faint">
+            {column.better === "high" ? "Higher is better." : "Lower is better."}
+          </p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * What a whole section is for, in both registers. The technical line is what the
+ * section already said; the plain line is what someone arriving from outside the
+ * field needs before the numbers mean anything. Collapsed by default so a reader
+ * who already knows is not made to scroll past it every time.
+ */
+export function SectionExplainer({ plain }: { plain: string }) {
+  return (
+    <details className="group mt-3">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-small text-oxblood underline underline-offset-4">
+        <span className="group-open:hidden">What is this section measuring?</span>
+        <span className="hidden group-open:inline">Hide</span>
+      </summary>
+      <p className="mt-2 max-w-measure border-l-2 border-rule-strong pl-4 text-small text-ink-soft">
+        {plain}
+      </p>
+    </details>
+  );
+}
+
+/** A legend for what the marked cells mean, shown under each metric table. */
+function BestCellLegend({ columns }: { columns: Column[] }) {
+  if (!columns.some((c) => c.better)) return null;
+  return (
+    <p className="mt-3 flex flex-wrap items-center gap-2 px-4 pb-3 text-micro text-ink-faint">
+      <span aria-hidden className="inline-block h-3 w-6 rounded-sm bg-oxblood-wash ring-1 ring-inset ring-oxblood/30" />
+      Best value for that site. Hover or tap a column heading to see what it measures.
+    </p>
+  );
+}
+
 /** One table per site, with the best value in each column marked. */
 export function MetricTable({
   title,
@@ -180,7 +366,7 @@ export function MetricTable({
               <th className="px-4 py-3 font-medium">Chunker</th>
               {columns.map((c) => (
                 <th key={c.key} className="px-4 py-3 text-right font-medium">
-                  {c.label}
+                  <ColumnHeading column={c} />
                 </th>
               ))}
             </tr>
@@ -215,9 +401,21 @@ export function MetricTable({
                     return (
                       <td
                         key={c.key}
-                        className={clsx("tabular px-4 py-2.5 text-right", isBest ? "font-semibold text-oxblood" : "text-ink")}
+                        // The winner is marked on the cell, not only the number.
+                        // Colouring four characters of text in a table this wide
+                        // was almost invisible, and invisible to anyone reading
+                        // it in greyscale or with a colour deficiency — hence the
+                        // ring and the weight as well as the tint.
+                        className={clsx(
+                          "tabular px-4 py-2.5 text-right",
+                          isBest
+                            ? "bg-oxblood-wash font-semibold text-oxblood-deep ring-1 ring-inset ring-oxblood/30"
+                            : "text-ink",
+                        )}
+                        title={isBest ? `Best ${c.label} for ${site}` : undefined}
                       >
                         {c.show(v)}
+                        {isBest && <span className="sr-only"> — best for this site</span>}
                       </td>
                     );
                   })}
@@ -226,6 +424,7 @@ export function MetricTable({
             })}
           </tbody>
         </table>
+        <BestCellLegend columns={columns} />
       </Panel>
     </section>
   );

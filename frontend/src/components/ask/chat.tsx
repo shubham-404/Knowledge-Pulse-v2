@@ -72,12 +72,39 @@ export function CitationItem({ citation: c }: { citation: Citation }) {
   );
 }
 
+/**
+ * Retrieval already collapses passages that are the same material, so this is a
+ * safety net rather than the fix: an archived turn answered before that landed
+ * can still carry several copies of one section at different similarities, and
+ * five copies of one paragraph is not five pieces of evidence. Keeping the
+ * best-scoring copy of each section matches what a fresh answer would show.
+ */
+function distinct(citations: Citation[]): Citation[] {
+  const best = new Map<string, Citation>();
+  for (const c of citations) {
+    const key = `${c.sourceLabel}\u241F${c.headingPath}`;
+    const seen = best.get(key);
+    if (!seen || c.similarity > seen.similarity) best.set(key, c);
+  }
+  return [...best.values()].sort((a, b) => b.similarity - a.similarity);
+}
+
 export function CitationList({ citations }: { citations: Citation[] }) {
+  const shown = distinct(citations);
+  const collapsed = citations.length - shown.length;
+
   return (
     <div>
-      <p className="mb-2 text-small text-ink-soft">Sources</p>
+      <p className="mb-2 text-small text-ink-soft">
+        Sources
+        {collapsed > 0 && (
+          <span className="ml-2 text-micro text-ink-faint">
+            {collapsed} repeated {collapsed === 1 ? "passage" : "passages"} merged
+          </span>
+        )}
+      </p>
       <ul className="space-y-2">
-        {citations.map((c) => (
+        {shown.map((c) => (
           <CitationItem key={c.chunkId} citation={c} />
         ))}
       </ul>
