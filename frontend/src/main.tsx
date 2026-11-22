@@ -12,6 +12,7 @@ import { AskPage } from "@/pages/AskPage";
 import { SourcesPage } from "@/pages/SourcesPage";
 import { EvaluationPage } from "@/pages/EvaluationPage";
 import { ResearchPage } from "@/pages/ResearchPage";
+import AnimatedLogo from "@/components/ui/loader";
 import "./index.css";
 
 // Everything except /login sits behind RequireAuth.
@@ -44,8 +45,13 @@ const router = createBrowserRouter([
   },
 ]);
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const root = ReactDOM.createRoot(document.getElementById("root")!);
+
+root.render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <>
+      <RouterProvider router={router} />
+      <AnimatedLogo />
+    </>
   </React.StrictMode>,
 );
